@@ -3,8 +3,16 @@ import os
 from ...lib import fusionAddInUtils as futil
 from ... import config
 import math
+import collections
+import traceback
+
+
+UserParm = collections.namedtuple('Parm', 'name value unit desc')
+FParm = collections.namedtuple('Parm', 'value fRef')
+
 app = adsk.core.Application.get()
 ui = app.userInterface
+
 design = adsk.fusion.Design.cast(app.activeProduct)
 root = design.rootComponent
 features = root.features
@@ -31,7 +39,6 @@ baseThickness = 0.3
 totalHeight = 2.5
 computeCut = False
 
-
 # TODO *** Specify the command identity information. ***
 CMD_ID = f'{config.COMPANY_NAME}_{config.ADDIN_NAME}_cmdDialog'
 CMD_NAME = 'Multiconnect Back Genrator'
@@ -54,6 +61,24 @@ ICON_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resource
 # Local list of event handlers used to maintain a reference so
 # they are not released and garbage collected.
 local_handlers = []
+
+onRampEveryXSlotsParm = "onRampEveryXSlots"
+distanceBetweenSlotsParm = "distanceBetweenSlots"
+baseThicknessParm = "baseThickness"
+totalHeightParm = "totalHeight"
+computeCutParm = "computeCut"
+
+generalModelUserParms = [
+    UserParm(onRampEveryXSlotsParm, onRampEveryXSlots, "cm", 'not sure what it does'),
+    UserParm(distanceBetweenSlotsParm, distanceBetweenSlots, "cm", 'distance between slots'),
+    UserParm(baseThicknessParm, baseThickness, "cm", 'base thickness'),
+    UserParm(totalHeightParm, totalHeight, "cm", 'total height'),
+    UserParm(computeCutParm, 1 if computeCut else 0,  '', 'meaning'),
+]
+
+# we need to define this here so it becomes global
+dUserParms = None
+
 
 
 # Executed when add-in is run.
@@ -125,70 +150,101 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     futil.add_handler(args.command.destroy, command_destroy, local_handlers=local_handlers)
 
 
+def create_user_parm_if_needed(param):
+
+    print("Definining parameter ", param, "\n")
+
+    fRef = userParams.itemByName(param.name)
+
+    if fRef is None:
+        fRef=userParams.add(param.name,
+                            adsk.core.ValueInput.createByString(str(param.value)),
+                            param.unit, param.desc)
+        
+    return (param.name, FParm(param.value, fRef))
+
 # This event handler is called when the user clicks the OK button in the command dialog or 
 # is immediately called after the created event not command inputs were created for the dialog.
 def command_execute(args: adsk.core.CommandEventArgs):
 
-    # Get a reference to your command's inputs.
-    inputs = args.command.commandInputs
-    width_value_input: adsk.core.TextBoxCommandInput = inputs.itemById('width_value_input')
-    height_value_input: adsk.core.ValueCommandInput = inputs.itemById('height_value_input')
-    tool_only_input = inputs.itemById('tools_only')
+    try:
 
-    backHeight = max(2.5, height_value_input.value)
-    backWidth = max(width_value_input.value, distanceBetweenSlots)
-    slotCount = math.floor(backWidth/distanceBetweenSlots)
-    backThickness = 0.65
-
-
-
-    slot_tool = create_slot(backHeight)
+        # Get a reference to your command's inputs.
+        inputs = args.command.commandInputs
+        width_value_input: adsk.core.TextBoxCommandInput = inputs.itemById('width_value_input')
+        height_value_input: adsk.core.ValueCommandInput = inputs.itemById('height_value_input')
+        tool_only_input = inputs.itemById('tools_only')
     
-    # Move the tool to the middle slot location
-    bodies = adsk.core.ObjectCollection.create()
-    bodies.add(slot_tool)
+        backHeight = max(2.5, height_value_input.value)
+        backWidth = max(width_value_input.value, distanceBetweenSlots)
+        slotCount = math.floor(backWidth/distanceBetweenSlots)
+        backThickness = 0.65
+    
+    
+        modelUserParms = [
+            UserParm("width", width_value_input.value, "cm", "width of the model"),
+            UserParm("height", height_value_input.value, "cm", 'height of the model'),
+            UserParm("tools_only", 1 if tool_only_input.value else 0, "", 'who knows'),
+            UserParm("backHeight", f'max(width;{distanceBetweenSlotsParm})', "cm", 'height of the back')
+        ]
 
-    # offset to the edge location, because symmetrical patterns aren't working correctly in the API
-    slotXShift = (distanceBetweenSlots * ( 1 - slotCount))/2
- 
-    vector = adsk.core.Vector3D.create(slotXShift, backThickness - 0.5, backHeight - 1.3)
-    transform = adsk.core.Matrix3D.create()
-    transform.translation = vector
+        dUserParms = dict(map(create_user_parm_if_needed, generalModelUserParms + modelUserParms))
+    
+    
+        slot_tool = create_slot(backHeight)
+        
+        # Move the tool to the middle slot location
+        bodies = adsk.core.ObjectCollection.create()
+        bodies.add(slot_tool)
+    
+        # offset to the edge location, because symmetrical patterns aren't working correctly in the API
+        slotXShift = (distanceBetweenSlots * ( 1 - slotCount))/2
+     
+        vector = adsk.core.Vector3D.create(slotXShift, backThickness - 0.5, backHeight - 1.3)
+        transform = adsk.core.Matrix3D.create()
+        transform.translation = vector
+    
+        moveFeats = features.moveFeatures
+        moveFeatureInput = moveFeats.createInput2(bodies)
+        moveFeatureInput.defineAsFreeMove(transform)
+        moveFeats.add(moveFeatureInput)
+    
+        #  Make more slots
+        rectangularPatterns = features.rectangularPatternFeatures
+        patternInput = rectangularPatterns.createInput(
+            bodies, 
+            root.xConstructionAxis,
+            adsk.core.ValueInput.createByReal(slotCount),
+            adsk.core.ValueInput.createByReal(distanceBetweenSlots), 
+            adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
+    
+        slotPattern = rectangularPatterns.add(patternInput)
+        slotBodies = adsk.core.ObjectCollection.create()
+        for body in slotPattern.bodies:
+                slotBodies.add(body)
+    
+    
+        if not tool_only_input.value:
+        # Make the overall shape
+            back = create_back_cube(backWidth, backThickness, backHeight)
+    
+            # Subtract the slot tool
+            combineFeatures = features.combineFeatures
+    
+            input: adsk.fusion.CombineFeatureInput = combineFeatures.createInput(back, slotBodies)
+            input.isNewComponent = False
+            input.isKeepToolBodies = False
+            input.operation = adsk.fusion.FeatureOperations.CutFeatureOperation
+            combineFeature = combineFeatures.add(input)
 
-    moveFeats = features.moveFeatures
-    moveFeatureInput = moveFeats.createInput2(bodies)
-    moveFeatureInput.defineAsFreeMove(transform)
-    moveFeats.add(moveFeatureInput)
 
-    #  Make more slots
-    rectangularPatterns = features.rectangularPatternFeatures
-    patternInput = rectangularPatterns.createInput(
-        bodies, 
-        root.xConstructionAxis,
-        adsk.core.ValueInput.createByReal(slotCount),
-        adsk.core.ValueInput.createByReal(distanceBetweenSlots), 
-        adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
+    except:
+        if ui:
+            ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
 
-    slotPattern = rectangularPatterns.add(patternInput)
-    slotBodies = adsk.core.ObjectCollection.create()
-    for body in slotPattern.bodies:
-            slotBodies.add(body)
-
-
-    if not tool_only_input.value:
-    # Make the overall shape
-        back = create_back_cube(backWidth, backThickness, backHeight)
-
-        # Subtract the slot tool
-        combineFeatures = features.combineFeatures
-
-        input: adsk.fusion.CombineFeatureInput = combineFeatures.createInput(back, slotBodies)
-        input.isNewComponent = False
-        input.isKeepToolBodies = False
-        input.operation = adsk.fusion.FeatureOperations.CutFeatureOperation
-        combineFeature = combineFeatures.add(input)
-
-
+        app.log(f'Failed:\n{traceback.format_exc()}')
+    
+    
 def create_back_cube(w, d, h):
     sketch = root.sketches.add(root.xYConstructionPlane)
     sketch.name = "Back Profile"
@@ -232,8 +288,12 @@ def create_slot(backHeight):
 
     # Extrude the slot length
     extrudes = features.extrudeFeatures
-    distance = adsk.core.ValueInput.createByReal(backHeight * -1)
-    extrude1 = extrudes.addSimple(slotProfile, distance, adsk.fusion.FeatureOperations.JoinFeatureOperation)        
+    ############ this is the extrude that needs to be parametrized
+
+    distance = adsk.core.ValueInput.createByString("backHeight * -1")
+    extrude1 = extrudes.addSimple(slotProfile,
+                                  distance,
+                                  adsk.fusion.FeatureOperations.JoinFeatureOperation)        
     # Get the extrusion body
     body1 = extrude1.bodies.item(0)
     body1.name = "Slot"
