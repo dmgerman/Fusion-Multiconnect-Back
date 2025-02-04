@@ -9,8 +9,9 @@ import collections
 import traceback
 
 
-UserParm = collections.namedtuple('Parm', 'name value unit desc')
-FParm = collections.namedtuple('Parm', 'value fRef')
+UserParm = collections.namedtuple('UserParm', 'name value unit desc')
+FParm = collections.namedtuple('FParm', 'value fRef')
+SketchAxes = collections.namedtuple('SketchAxes', 'x y')
 
 valueFromExpr = adsk.core.ValueInput.createByString
 
@@ -84,9 +85,12 @@ generalModelUserParms = [
     UserParm(computeCutParm, 1 if computeCut else 0,  '', 'meaning'),
 ]
 
+
 # we need to define this here so it becomes global
 dUserParms = None
 
+# the current sketch axes
+sketchAxes = None
 
 
 # Executed when add-in is run.
@@ -270,16 +274,9 @@ def command_execute(args: adsk.core.CommandEventArgs):
         app.log(f'Failed:\n{traceback.format_exc()}')
     
     
-## [2025-02-02 Sun]
-### i am getting closer, but the rectangle must be the one
-### that has the dimensions set, not the points
-### because the sketch loses the dimensions when the sketch is done
-
-### but i need to redo this
-### look this: https://chatgpt.com/c/67a0616b-435c-8009-bbb8-c445a4250f64
-
-
 def create_point_dimensions_xy(sketch, x, y):
+    global sketchAxes
+
     point = adsk.core.Point3D.create(0,  0,0)
     point0 = adsk.core.Point3D.create(0, 0,0)
     sketchPoints = sketch.sketchPoints
@@ -293,11 +290,16 @@ def create_point_dimensions_xy(sketch, x, y):
                                                      adsk.fusion.DimensionOrientations.HorizontalDimensionOrientation,
                                                      adsk.core.Point3D.create(0, 0, 0))
         dimx.parameter.expression = x
+    else:
+        sketch.geometricConstraints.addCoincident(sketchP, sketchAxes.y)
+
     if y:
-        dimy = sketchDimensions.addDistanceDimension(sketchP, sketchP0, 
+        dimy = sketchDimensions.addDistanceDimension(sketchP, sketchP0,
                                                      adsk.fusion.DimensionOrientations.VerticalDimensionOrientation,
                                                      adsk.core.Point3D.create(0, 0, 0))
         dimy.parameter.expression = y
+    else:
+        sketch.geometricConstraints.addCoincident(sketchP, sketchAxes.x)
         
     return sketchP
 
@@ -305,7 +307,7 @@ def create_point_dimensions_xy(sketch, x, y):
 
 def create_centered_rectangle_dimensions(sketch, centerPoint, widthStr, heightStr,
                                          labelPointX=None, labelPointY=None):
-    # centerPoint is a dimension point
+    # centerPoint is a sketch point
 
     if labelPointX == None:
         labelPointX = adsk.core.Point3D.create(0, 0, 0)
@@ -346,11 +348,41 @@ def create_centered_rectangle_dimensions(sketch, centerPoint, widthStr, heightSt
     return rect
 
 
+def create_axis(sketch, isx, len):
+    # isx true for x axis
+    if isx:
+        point1 = adsk.core.Point3D.create(-len, 0, 0)
+        point2 = adsk.core.Point3D.create(len, 0, 0)
+        constr = sketch.geometricConstraints.addHorizontal
+    else:
+        point1 = adsk.core.Point3D.create(0, -len, 0)
+        point2 = adsk.core.Point3D.create(0, len, 0)
+        constr = sketch.geometricConstraints.addVertical
+        
+    axis = sketch.sketchCurves.sketchLines.addByTwoPoints(
+        point1, point2)
+
+    sketch.geometricConstraints.addCoincident(sketch.originPoint, axis)
+    
+    # set the horizontal/vertical constraint
+    constr(axis)
+    
+
+    ##sketch.originPoint
+    axis.isConstruction = True
+    return axis
+
 
 def create_back_cube(w, d, h):
+    global sketchAxes
     sketch = root.sketches.add(root.xYConstructionPlane)
     sketch.name = "Back Profile"
+    wDim = adsk.core.ValueInput.createByString(w)
+    dDim = adsk.core.ValueInput.createByString(d)
 
+    sketchAxes = SketchAxes(create_axis(sketch, True, 20),
+                            create_axis(sketch, False, 20))
+    
     centerPoint = create_point_dimensions_xy(sketch, None, d + "/2.0")
 
     #    cornerPoint = create_point_dimensions_xy(sketch, w + "/2.0", d)
