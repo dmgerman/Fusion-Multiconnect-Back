@@ -143,7 +143,7 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
 
     # Create a value input field for the width
     defaultLengthUnits = app.activeProduct.unitsManager.defaultLengthUnits
-    default_value = adsk.core.ValueInput.createByString('40')
+    default_value = adsk.core.ValueInput.createByString('140')
     inputs.addValueInput('width_value_input', 'Back Width', defaultLengthUnits, default_value)
 
     # Create a value input field for the height
@@ -162,10 +162,29 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     futil.add_handler(args.command.destroy, command_destroy, local_handlers=local_handlers)
 
 
+def join_bodies(bodies):
+    # join this bodies into a single one, keeping the name of the first
+
+    body = bodies.item(0)
+    name = body.name
+
+    tools = adsk.core.ObjectCollection.create()
+
+    for i in range(1, bodies.count):
+        tools.add(bodies.item(i))
+
+    combineFeatures = features.combineFeatures
+    combineInput = combineFeatures.createInput(body, tools)
+    combineInput.isNewComponent = False
+    combineInput.isKeepToolBodies = False
+    combineInput.operation = adsk.fusion.FeatureOperations.JoinFeatureOperation
+    combineFeatures.add(combineInput)
+    body.name = name
+    return body
+
+
+
 def create_user_parm_if_needed(param):
-
-    print("Definining parameter ", param, "\n")
-
     fRef = userParams.itemByName(param.name)
 
     if fRef is None:
@@ -187,17 +206,14 @@ def command_execute(args: adsk.core.CommandEventArgs):
         height_value_input: adsk.core.ValueCommandInput = inputs.itemById('height_value_input')
         tool_only_input = inputs.itemById('tools_only')
     
-        backHeight = max(2.5, height_value_input.value)
         backWidth = max(width_value_input.value, distanceBetweenSlots)
         slotCount = math.floor(backWidth/distanceBetweenSlots)
-        backThickness = 0.65
-    
     
         modelUserParms = [
             UserParm("width", width_value_input.value, "cm", "width of the model"),
             UserParm("height", height_value_input.value, "cm", 'height of the model'),
             UserParm("tools_only", 1 if tool_only_input.value else 0, "", 'who knows'),
-            UserParm("backHeight", f'max(height;2.4cm)', "cm", 'height of the back'),
+            UserParm("backHeight", f'max(height;2.5cm)', "cm", 'height of the back'),
             UserParm("backWidth", f'max(width;{distanceBetweenSlotsParm})', "cm", 'height of the back'),
             UserParm("slotCount", 'floor(backWidth/distanceBetweenSlots)', '', 'number of slots'),
             UserParm("backThickness", "0.65", "cm", 'thickness of the back')
@@ -213,29 +229,14 @@ def command_execute(args: adsk.core.CommandEventArgs):
         bodies.add(slot_tool)
     
         # offset to the edge location, because symmetrical patterns aren't working correctly in the API
-        slotXShift = (distanceBetweenSlots * ( 1 - slotCount))/2
-        slotXshiftStr = "(distanceBetweenSlots * ( 1 - slotCount))/2"
 
         ax = adsk.core.ValueInput.createByString("distanceBetweenSlots * ( 1 - slotCount)/2")
-        ay = adsk.core.ValueInput.createByString("backThickness - 0.5")
-        az = adsk.core.ValueInput.createByString("backHeight - 1.3")
-        assert(ax)
-        assert(ay)
-        assert(az)
+        ay = adsk.core.ValueInput.createByString("backThickness - 0.5cm")
+        az = adsk.core.ValueInput.createByString("backHeight - 1.3cm")
 
-        print("Values", ax, ay, az, "\n")
-
-#        vector = adsk.core.Vector3D.create(ax, ay, az)
-        vector = adsk.core.Vector3D.create(distanceBetweenSlots * ( 1 - slotCount)/2,
-                                           backThickness - 0.5, backHeight - 1.3)
-
-
-        transform = adsk.core.Matrix3D.create()
-        transform.translation = vector
-    
         moveFeats = features.moveFeatures
         moveFeatureInput = moveFeats.createInput2(bodies)
-        moveFeatureInput.defineAsFreeMove(transform)
+        moveFeatureInput.defineAsTranslateXYZ(ax, ay, az, True)
         moveFeats.add(moveFeatureInput)
     
         #  Make more slots
@@ -246,13 +247,19 @@ def command_execute(args: adsk.core.CommandEventArgs):
             adsk.core.ValueInput.createByString("slotCount"),
             adsk.core.ValueInput.createByString("distanceBetweenSlots"), 
             adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
-    
+
+        patternInput.setDirectionTwo(root.yConstructionAxis,
+                                     adsk.core.ValueInput.createByString('1'),
+                                     adsk.core.ValueInput.createByString('0cm'))
+
         slotPattern = rectangularPatterns.add(patternInput)
         slotBodies = adsk.core.ObjectCollection.create()
         for body in slotPattern.bodies:
-                slotBodies.add(body)
-    
-    
+            slotBodies.add(body)
+
+        # joint the slots into a body
+        slots = join_bodies(slotBodies)
+
         if not tool_only_input.value:
         # Make the overall shape
             back = create_back_cube("backWidth", "backThickness", "backHeight")
@@ -277,11 +284,14 @@ def command_execute(args: adsk.core.CommandEventArgs):
 def create_point_dimensions_xy(sketch, x, y):
     global sketchAxes
 
+    # we first create the points (anywhere)
     point = adsk.core.Point3D.create(0,  0,0)
     point0 = adsk.core.Point3D.create(0, 0,0)
     sketchPoints = sketch.sketchPoints
+
     sketchP = sketchPoints.add(point)
     sketchP0 = sketchPoints.add(point0)
+    # then we constraint them to their position
     
     sketchDimensions = sketch.sketchDimensions
     
@@ -315,26 +325,26 @@ def create_centered_rectangle_dimensions(sketch, centerPoint, widthStr, heightSt
         labelPointY = adsk.core.Point3D.create(0, 0, 0)
     labelPointCX = adsk.core.Point3D.create(0, 0, 0)
     labelPointCY = adsk.core.Point3D.create(0, 0, 0)
-    # we need to create dimensions for:
-    #    centerPoint,
-    #    width, and
-    #    height
 
     lines = sketch.sketchCurves.sketchLines
     dimensions = sketch.sketchDimensions
+    # create the rectangle to any point, we'll constraint it latere
     point = adsk.core.Point3D.create(10, 10, 0)
 
     # create rectangle
     rect = lines.addCenterPointRectangle(centerPoint.geometry, point)
 
     # Apply dimensions using user parameters
+    # length horizontal
     dimensions.addDistanceDimension(rect[0].startSketchPoint, rect[0].endSketchPoint, 
                                     adsk.fusion.DimensionOrientations.HorizontalDimensionOrientation, 
                                     labelPointX).parameter.expression = widthStr
+    # length vertical
     dimensions.addDistanceDimension(rect[1].startSketchPoint, rect[1].endSketchPoint, 
                                     adsk.fusion.DimensionOrientations.VerticalDimensionOrientation, 
                                     labelPointY).parameter.expression = heightStr
 
+    # position of the corner with respect to the centerPoint
     cornerx = dimensions.addDistanceDimension(rect[0].startSketchPoint, centerPoint, 
                                     adsk.fusion.DimensionOrientations.HorizontalDimensionOrientation,
                                                      labelPointCX)
@@ -366,7 +376,6 @@ def create_axis(sketch, isx, len):
     
     # set the horizontal/vertical constraint
     constr(axis)
-    
 
     ##sketch.originPoint
     axis.isConstruction = True
@@ -407,20 +416,23 @@ def create_slot():
     slotSketch = root.sketches.add(root.xYConstructionPlane)
     slotSketch.name = "Slot Profile"
 
+    # the profile has a forced overlap to make we can join all the slots
+    # into one (join only works on overlapping objects)
     profilePoints = [adsk.core.Point3D.create(x, y, 0) for x, y in
                      [[0,0],
                       [dotDiameter.value,0],
                       [dotDiameter.value,0.12121],
                       [0.765,0.3712],
                       [0.765,0.5],
+                      [1.3, 0.5],
+                      [1.3, 1.0],
+                      [0, 1.0],
                       [0,0.5]]]
 
     drawPolyline(slotSketch, profilePoints)
-
  
     slotProfile = slotSketch.profiles.item(0)
 
-    lines = slotSketch.sketchCurves.sketchLines
     axisLine = root.yConstructionAxis
 
     revolveFeats = features.revolveFeatures
@@ -434,8 +446,6 @@ def create_slot():
 
     # Extrude the slot length
     extrudes = features.extrudeFeatures
-    ############ this is the extrude that needs to be parametrized
-
     distance = adsk.core.ValueInput.createByString("backHeight * -1")
     extrude1 = extrudes.addSimple(slotProfile,
                                   distance,
